@@ -13,14 +13,13 @@ const user = new steamUser();
 
 let playingOnOtherSession = false;
 let reconnectTimer = null;
-let loginTimeout = null; // <-- Новый таймаут для защиты от зависаний
+let loginTimeout = null;
 
 function refreshGames() {
     if (playingOnOtherSession) {
-        console.log('Пользователь играет на другом устройстве. Накрутка приостановлена.');
         return;
     }
-    if (user.steamID) {
+    if (user.steamID && user.connected) {
         user.gamesPlayed(games);
         console.log('Накрутка активна: ' + games.join(', '));
     }
@@ -36,14 +35,13 @@ function scheduleReconnect(delayMs) {
 }
 
 function attemptLogOn() {
-    if (user.steamID) return;
+    if (user.steamID && user.connected) return; 
     console.log('Попытка входа в Steam...');
 
-    // Защита от зависания: если за 30 сек нет ответа, сбрасываем и пробуем снова
     if (loginTimeout) clearTimeout(loginTimeout);
     loginTimeout = setTimeout(() => {
         console.log('Таймаут входа (30 сек). Steam не ответил, принудительно переподключаюсь...');
-        user.logOff(); // Сбрасываем зависшее соединение
+        user.logOff(); 
         playingOnOtherSession = true;
         scheduleReconnect(60000);
     }, 30000);
@@ -63,8 +61,9 @@ function attemptLogOn() {
 user.on('loggedOn', () => {
     console.log(user.steamID + ' - Бот вошёл в аккаунт');
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-    if (loginTimeout) { clearTimeout(loginTimeout); loginTimeout = null; } // Отменяем таймаут при успехе
+    if (loginTimeout) { clearTimeout(loginTimeout); loginTimeout = null; }
     
+    playingOnOtherSession = false; // Сбрасываем флаг при успешном входе
     user.setPersona(status);
     refreshGames();
 });
@@ -83,7 +82,7 @@ user.on('playingState', (blocked, app) => {
 user.on('error', (err) => {
     console.error('Ошибка Steam:', err.message, '| eresult:', err.eresult);
     
-    if (loginTimeout) { clearTimeout(loginTimeout); loginTimeout = null; } // Отменяем таймаут
+    if (loginTimeout) { clearTimeout(loginTimeout); loginTimeout = null; }
 
     if (err.eresult === 6) {
         console.log('Сессия завершена (вы играете). Жду выхода из игры, проверяю каждую минуту...');
@@ -102,10 +101,26 @@ user.on('error', (err) => {
 user.on('disconnected', (err, code) => {
     console.log('Соединение с Steam разорвано.', code ? `Код: ${code}` : '');
     if (loginTimeout) { clearTimeout(loginTimeout); loginTimeout = null; }
-    if (!reconnectTimer && !user.steamID) {
+    if (!reconnectTimer && (!user.steamID || !user.connected)) {
+        playingOnOtherSession = true;
         scheduleReconnect(60000);
     }
 });
 
-attemptLogOn();
+// ==========================================
+// НОВОЕ: Сторожевой таймер (Watchdog)
+// ==========================================
+setInterval(() => {
+    // Если бот думает, что он в сети (есть steamID), но физически соединение потеряно (!user.connected)
+    if (user.steamID && !user.connected) {
+        console.log('⚠️ Обнаружена потеря связи со Steam (зомби-сессия). Принудительно переподключаюсь...');
+        user.logOff(); 
+        playingOnOtherSession = true;
+        scheduleReconnect(5000); // Пробуем через 5 секунд
+    }
+}, 60000); // Проверяем каждую минуту
+
+// Таймер для периодического подтверждения статуса «в игре»
 setInterval(refreshGames, 5 * 60 * 1000);
+
+attemptLogOn();
