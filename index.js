@@ -1,55 +1,102 @@
 const steamUser = require('steam-user');
 const steamTotp = require('steam-totp');
-require('./keep_alive.js'); // keep-alive сервер для Render
+require('./keep_alive.js');
 
 const username = process.env.login;
 const password = process.env.password;
 const shared_secret = process.env.shared;
 
-const games = [730]; // App ID игры
-const status = 7; // 1 - online, 7 - invisible
+const games = [730];
+const status = 7;
 
 const user = new steamUser();
 
-// Флаг: играет ли пользователь сейчас на другом устройстве
 let playingOnOtherSession = false;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
 
-// Функция, которая включает или выключает накрутку в зависимости от флага
 function refreshGames() {
     if (playingOnOtherSession) {
-        // Пользователь играет сам — бот ничего не делает, но остаётся в сети
         console.log('Пользователь играет на другом устройстве. Накрутка приостановлена.');
         return;
     }
-    // Пользователь не играет — запускаем игры
-    user.gamesPlayed(games);
-    console.log('Накрутка активна: ' + games.join(', '));
+    if (user.steamID) {
+        user.gamesPlayed(games);
+        console.log('Накрутка активна: ' + games.join(', '));
+    }
 }
 
-user.logOn({
-    accountName: username,
-    password: password,
-    twoFactorCode: steamTotp.generateAuthCode(shared_secret)
-});
+function scheduleReconnect(delayMs) {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectAttempts++;
+    // Постепенно увеличиваем интервал: 1 мин, 2 мин, 3 мин... но не больше 5 минут
+    const wait = Math.min(delayMs * reconnectAttempts, 5 * 60 * 1000);
+    console.log(`Планирую переподключение через ${Math.round(wait / 1000)} сек (попытка #${reconnectAttempts})...`);
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        attemptLogOn();
+    }, wait);
+}
+
+function attemptLogOn() {
+    if (user.steamID) return; // уже в сети
+    console.log('Попытка входа в Steam...');
+    try {
+        user.logOn({
+            accountName: username,
+            password: password,
+            twoFactorCode: steamTotp.generateAuthCode(shared_secret)
+        });
+    } catch (e) {
+        console.error('Ошибка при вызове logOn:', e.message);
+        scheduleReconnect(60000);
+    }
+}
 
 user.on('loggedOn', () => {
     console.log(user.steamID + ' - Бот вошёл в аккаунт');
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+    reconnectAttempts = 0;
     user.setPersona(status);
-    refreshGames(); // Запускаем накрутку сразу после входа
+    refreshGames();
 });
 
-// КЛЮЧЕВОЕ СОБЫТИЕ: Steam сообщает, что аккаунт используется для игры в другом месте
 user.on('playingState', (blocked, app) => {
+    if (playingOnOtherSession === blocked) return; // состояние не изменилось
     playingOnOtherSession = blocked;
-
     if (blocked) {
         console.log(`Обнаружена игра на другом устройстве (AppID: ${app}). Накрутка на паузе.`);
     } else {
         console.log('Пользователь вышел из игры. Возобновляю накрутку.');
-        refreshGames(); // Пользователь вышел — сразу возобновляем
+        refreshGames();
     }
 });
 
-// Периодическое обновление статуса «в игре» (раз в 5 минут),
-// чтобы Steam не сбрасывал его, пока пользователь не играет
+// ГЛАВНОЕ ИСПРАВЛЕНИЕ: перехват LoggedInElsewhere и других ошибок
+user.on('error', (err) => {
+    console.error('Ошибка Steam:', err.message, '| eresult:', err.eresult);
+
+    if (err.eresult === 6) {
+        // LoggedInElsewhere — вы играете на другом устройстве
+        console.log('Сессия бота завершена, так как вы играете на другом устройстве. Жду выхода из игры...');
+        playingOnOtherSession = true;
+        scheduleReconnect(60000); // первая попытка через ~1 минуту
+    } else {
+        // Прочие ошибки (сеть, таймауты и т.д.)
+        console.log('Неизвестная ошибка, планирую переподключение...');
+        scheduleReconnect(30000);
+    }
+});
+
+user.on('disconnected', (err, code) => {
+    console.log('Соединение с Steam разорвано.', code ? `Код: ${code}` : '');
+    if (!reconnectTimer && !user.steamID) {
+        scheduleReconnect(30000);
+    }
+});
+
+attemptLogOn();
 setInterval(refreshGames, 5 * 60 * 1000);
