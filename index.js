@@ -16,10 +16,8 @@ let reconnectTimer = null;
 let loginTimeout = null;
 
 function refreshGames() {
-    if (playingOnOtherSession) {
-        return;
-    }
-    if (user.steamID && user.connected) {
+    if (playingOnOtherSession) return;
+    if (user.steamID) {
         user.gamesPlayed(games);
         console.log('Накрутка активна: ' + games.join(', '));
     }
@@ -35,12 +33,12 @@ function scheduleReconnect(delayMs) {
 }
 
 function attemptLogOn() {
-    if (user.steamID && user.connected) return; 
+    if (user.steamID) return; 
     console.log('Попытка входа в Steam...');
 
     if (loginTimeout) clearTimeout(loginTimeout);
     loginTimeout = setTimeout(() => {
-        console.log('Таймаут входа (30 сек). Steam не ответил, принудительно переподключаюсь...');
+        console.log('Таймаут входа (30 сек). Steam не ответил, переподключаюсь...');
         user.logOff(); 
         playingOnOtherSession = true;
         scheduleReconnect(60000);
@@ -63,7 +61,7 @@ user.on('loggedOn', () => {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (loginTimeout) { clearTimeout(loginTimeout); loginTimeout = null; }
     
-    playingOnOtherSession = false; // Сбрасываем флаг при успешном входе
+    playingOnOtherSession = false; 
     user.setPersona(status);
     refreshGames();
 });
@@ -101,23 +99,38 @@ user.on('error', (err) => {
 user.on('disconnected', (err, code) => {
     console.log('Соединение с Steam разорвано.', code ? `Код: ${code}` : '');
     if (loginTimeout) { clearTimeout(loginTimeout); loginTimeout = null; }
-    if (!reconnectTimer && (!user.steamID || !user.connected)) {
+    if (!reconnectTimer && !user.steamID) {
         playingOnOtherSession = true;
         scheduleReconnect(60000);
     }
 });
 
 // ==========================================
-// НОВОЕ: Сторожевой таймер (Watchdog)
+// НОВЫЙ СТОРОЖЕВОЙ ТАЙМЕР (Ping Watchdog)
 // ==========================================
 setInterval(() => {
-    // Если бот думает, что он в сети (есть steamID), но физически соединение потеряно (!user.connected)
-    if (user.steamID && !user.connected) {
-        console.log('⚠️ Обнаружена потеря связи со Steam (зомби-сессия). Принудительно переподключаюсь...');
-        user.logOff(); 
-        playingOnOtherSession = true;
-        scheduleReconnect(5000); // Пробуем через 5 секунд
-    }
+    if (!user.steamID) return; // Если не в сети, не пингуем
+
+    let isAlive = false;
+    
+    // Если Steam не ответит на запрос за 15 секунд, значит связь мертва
+    const pingTimeout = setTimeout(() => {
+        if (!isAlive) {
+            console.log('⚠️ Таймаут ответа от Steam (зомби-сессия). Принудительно переподключаюсь...');
+            user.logOff(); 
+            playingOnOtherSession = true;
+            scheduleReconnect(5000); // Пробуем через 5 сек
+        }
+    }, 15000); 
+
+    // Отправляем запрос в Steam (запрашиваем инфу о самом себе)
+    user.getPersonas([user.steamID], (err) => {
+        isAlive = true;
+        clearTimeout(pingTimeout);
+        if (err) {
+            console.error('Ошибка пинга:', err.message);
+        }
+    });
 }, 60000); // Проверяем каждую минуту
 
 // Таймер для периодического подтверждения статуса «в игре»
