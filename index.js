@@ -13,7 +13,6 @@ const user = new steamUser();
 
 let playingOnOtherSession = false;
 let reconnectTimer = null;
-let reconnectAttempts = 0;
 
 function refreshGames() {
     if (playingOnOtherSession) {
@@ -28,18 +27,15 @@ function refreshGames() {
 
 function scheduleReconnect(delayMs) {
     if (reconnectTimer) clearTimeout(reconnectTimer);
-    reconnectAttempts++;
-    // Постепенно увеличиваем интервал: 1 мин, 2 мин, 3 мин... но не больше 5 минут
-    const wait = Math.min(delayMs * reconnectAttempts, 5 * 60 * 1000);
-    console.log(`Планирую переподключение через ${Math.round(wait / 1000)} сек (попытка #${reconnectAttempts})...`);
+    console.log(`Планирую переподключение через ${Math.round(delayMs / 1000)} сек...`);
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         attemptLogOn();
-    }, wait);
+    }, delayMs);
 }
 
 function attemptLogOn() {
-    if (user.steamID) return; // уже в сети
+    if (user.steamID) return;
     console.log('Попытка входа в Steam...');
     try {
         user.logOn({
@@ -59,13 +55,12 @@ user.on('loggedOn', () => {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
     }
-    reconnectAttempts = 0;
     user.setPersona(status);
     refreshGames();
 });
 
 user.on('playingState', (blocked, app) => {
-    if (playingOnOtherSession === blocked) return; // состояние не изменилось
+    if (playingOnOtherSession === blocked) return;
     playingOnOtherSession = blocked;
     if (blocked) {
         console.log(`Обнаружена игра на другом устройстве (AppID: ${app}). Накрутка на паузе.`);
@@ -75,26 +70,29 @@ user.on('playingState', (blocked, app) => {
     }
 });
 
-// ГЛАВНОЕ ИСПРАВЛЕНИЕ: перехват LoggedInElsewhere и других ошибок
 user.on('error', (err) => {
     console.error('Ошибка Steam:', err.message, '| eresult:', err.eresult);
 
     if (err.eresult === 6) {
-        // LoggedInElsewhere — вы играете на другом устройстве
-        console.log('Сессия бота завершена, так как вы играете на другом устройстве. Жду выхода из игры...');
+        // LoggedInElsewhere — вы играете
+        console.log('Сессия бота завершена (вы играете). Жду выхода из игры, проверяю каждую минуту...');
         playingOnOtherSession = true;
-        scheduleReconnect(60000); // первая попытка через ~1 минуту
+        scheduleReconnect(60 * 1000); // Строго 1 минута
+    } else if (err.eresult === 84 || err.eresult === 87) {
+        // RateLimitExceeded — Steam временно ограничил вход
+        console.log('Steam временно ограничил вход. Жду 15 минут...');
+        playingOnOtherSession = true;
+        scheduleReconnect(15 * 60 * 1000); // Строго 15 минут
     } else {
-        // Прочие ошибки (сеть, таймауты и т.д.)
         console.log('Неизвестная ошибка, планирую переподключение...');
-        scheduleReconnect(30000);
+        scheduleReconnect(60 * 1000);
     }
 });
 
 user.on('disconnected', (err, code) => {
     console.log('Соединение с Steam разорвано.', code ? `Код: ${code}` : '');
     if (!reconnectTimer && !user.steamID) {
-        scheduleReconnect(30000);
+        scheduleReconnect(60000);
     }
 });
 
