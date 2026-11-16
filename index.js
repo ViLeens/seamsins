@@ -25,7 +25,7 @@ function refreshGames() {
 
 function scheduleReconnect(delayMs) {
     if (reconnectTimer) clearTimeout(reconnectTimer);
-    console.log(`Планирую переподключение через ${Math.round(delayMs / 1000)} сек...`);
+    console.log(`Планирую переподключение через ${Math.round(delayMs / 60000)} мин...`);
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         attemptLogOn();
@@ -41,7 +41,7 @@ function attemptLogOn() {
         console.log('Таймаут входа (30 сек). Steam не ответил, переподключаюсь...');
         user.logOff(); 
         playingOnOtherSession = true;
-        scheduleReconnect(60000);
+        scheduleReconnect(5 * 60 * 1000); // Если таймаут - ждем 5 минут
     }, 30000);
 
     try {
@@ -52,7 +52,7 @@ function attemptLogOn() {
         });
     } catch (e) {
         console.error('Ошибка при вызове logOn:', e.message);
-        scheduleReconnect(60000);
+        scheduleReconnect(5 * 60 * 1000);
     }
 }
 
@@ -83,16 +83,18 @@ user.on('error', (err) => {
     if (loginTimeout) { clearTimeout(loginTimeout); loginTimeout = null; }
 
     if (err.eresult === 6) {
-        console.log('Сессия завершена (вы играете). Жду выхода из игры, проверяю каждую минуту...');
+        // ВЫ ИГРАЕТЕ. Ждем 10 минут, чтобы не спамить Steam
+        console.log('Сессия завершена (вы играете). Следующая проверка через 10 минут...');
         playingOnOtherSession = true;
-        scheduleReconnect(60 * 1000);
+        scheduleReconnect(10 * 60 * 1000); // 10 минут
     } else if (err.eresult === 84 || err.eresult === 87) {
-        console.log('Steam временно ограничил вход. Жду 15 минут...');
+        // Лимит запросов
+        console.log('Steam временно ограничил вход. Жду 30 минут...');
         playingOnOtherSession = true;
-        scheduleReconnect(15 * 60 * 1000);
+        scheduleReconnect(30 * 60 * 1000); // 30 минут
     } else {
-        console.log('Неизвестная ошибка, планирую переподключение...');
-        scheduleReconnect(60 * 1000);
+        console.log('Неизвестная ошибка, планирую переподключение через 5 минут...');
+        scheduleReconnect(5 * 60 * 1000);
     }
 });
 
@@ -101,39 +103,31 @@ user.on('disconnected', (err, code) => {
     if (loginTimeout) { clearTimeout(loginTimeout); loginTimeout = null; }
     if (!reconnectTimer && !user.steamID) {
         playingOnOtherSession = true;
-        scheduleReconnect(60000);
+        scheduleReconnect(5 * 60 * 1000);
     }
 });
 
-// ==========================================
-// НОВЫЙ СТОРОЖЕВОЙ ТАЙМЕР (Ping Watchdog)
-// ==========================================
+// Сторожевой таймер
 setInterval(() => {
-    if (!user.steamID) return; // Если не в сети, не пингуем
+    if (!user.steamID) return; 
 
     let isAlive = false;
-    
-    // Если Steam не ответит на запрос за 15 секунд, значит связь мертва
     const pingTimeout = setTimeout(() => {
         if (!isAlive) {
             console.log('⚠️ Таймаут ответа от Steam (зомби-сессия). Принудительно переподключаюсь...');
             user.logOff(); 
             playingOnOtherSession = true;
-            scheduleReconnect(5000); // Пробуем через 5 сек
+            scheduleReconnect(5 * 60 * 1000); 
         }
     }, 15000); 
 
-    // Отправляем запрос в Steam (запрашиваем инфу о самом себе)
     user.getPersonas([user.steamID], (err) => {
         isAlive = true;
         clearTimeout(pingTimeout);
-        if (err) {
-            console.error('Ошибка пинга:', err.message);
-        }
+        if (err) console.error('Ошибка пинга:', err.message);
     });
-}, 60000); // Проверяем каждую минуту
+}, 60000); 
 
-// Таймер для периодического подтверждения статуса «в игре»
 setInterval(refreshGames, 5 * 60 * 1000);
 
 attemptLogOn();
